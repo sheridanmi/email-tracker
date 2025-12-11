@@ -1,10 +1,3 @@
-/**
- * Email Tracking Server
- * Handles open tracking (pixel), link click tracking, and provides API for stats
- * 
- * Free deployment options: Render.com, Railway.app, Vercel, Fly.io
- */
-
 const express = require('express');
 const cors = require('cors');
 const Database = require('better-sqlite3');
@@ -72,14 +65,10 @@ const TRACKING_PIXEL = Buffer.from(
 // TRACKING ENDPOINTS
 // ============================================
 
-/**
- * Tracking Pixel Endpoint
- * Embed this in emails: <img src="https://yourserver.com/t/EMAIL_ID.png" />
- */
+// Tracking Pixel - logs when email is opened
 app.get('/t/:emailId.png', (req, res) => {
   const { emailId } = req.params;
   
-  // Log the open
   try {
     const stmt = db.prepare(`
       INSERT INTO opens (email_id, ip_address, user_agent)
@@ -94,7 +83,6 @@ app.get('/t/:emailId.png', (req, res) => {
     console.error('Error logging open:', err);
   }
 
-  // Return the tracking pixel
   res.set({
     'Content-Type': 'image/png',
     'Content-Length': TRACKING_PIXEL.length,
@@ -105,22 +93,17 @@ app.get('/t/:emailId.png', (req, res) => {
   res.send(TRACKING_PIXEL);
 });
 
-/**
- * Link Click Tracking Endpoint
- * Redirect links through: https://yourserver.com/c/LINK_ID
- */
+// Link Click Tracking - logs clicks then redirects
 app.get('/c/:linkId', (req, res) => {
   const { linkId } = req.params;
 
   try {
-    // Get the original URL
     const link = db.prepare('SELECT original_url FROM links WHERE id = ?').get(linkId);
     
     if (!link) {
       return res.status(404).send('Link not found');
     }
 
-    // Log the click
     const stmt = db.prepare(`
       INSERT INTO clicks (link_id, ip_address, user_agent)
       VALUES (?, ?, ?)
@@ -131,7 +114,6 @@ app.get('/c/:linkId', (req, res) => {
       req.headers['user-agent'] || 'Unknown'
     );
 
-    // Redirect to original URL
     res.redirect(302, link.original_url);
   } catch (err) {
     console.error('Error processing click:', err);
@@ -140,12 +122,10 @@ app.get('/c/:linkId', (req, res) => {
 });
 
 // ============================================
-// API ENDPOINTS (for Gmail Add-on & Dashboard)
+// API ENDPOINTS
 // ============================================
 
-/**
- * Register a new tracked email
- */
+// Register a new tracked email
 app.post('/api/emails', (req, res) => {
   const { subject, recipient, userEmail } = req.body;
   const emailId = crypto.randomBytes(8).toString('hex');
@@ -167,9 +147,7 @@ app.post('/api/emails', (req, res) => {
   }
 });
 
-/**
- * Register a tracked link for an email
- */
+// Register a tracked link
 app.post('/api/links', (req, res) => {
   const { emailId, originalUrl } = req.body;
   const linkId = crypto.randomBytes(6).toString('hex');
@@ -191,9 +169,7 @@ app.post('/api/links', (req, res) => {
   }
 });
 
-/**
- * Get all emails for a user with stats
- */
+// Get all emails for a user
 app.get('/api/emails', (req, res) => {
   const { userEmail } = req.query;
 
@@ -224,16 +200,12 @@ app.get('/api/emails', (req, res) => {
   }
 });
 
-/**
- * Get detailed stats for a single email
- */
+// Get detailed stats for one email
 app.get('/api/emails/:emailId', (req, res) => {
   const { emailId } = req.params;
 
   try {
-    const email = db.prepare(`
-      SELECT * FROM emails WHERE id = ?
-    `).get(emailId);
+    const email = db.prepare(`SELECT * FROM emails WHERE id = ?`).get(emailId);
 
     if (!email) {
       return res.status(404).json({ error: 'Email not found' });
@@ -241,18 +213,14 @@ app.get('/api/emails/:emailId', (req, res) => {
 
     const opens = db.prepare(`
       SELECT opened_at, ip_address, user_agent 
-      FROM opens 
-      WHERE email_id = ? 
+      FROM opens WHERE email_id = ? 
       ORDER BY opened_at DESC
     `).all(emailId);
 
     const links = db.prepare(`
-      SELECT 
-        l.id,
-        l.original_url,
+      SELECT l.id, l.original_url,
         (SELECT COUNT(*) FROM clicks WHERE link_id = l.id) as click_count
-      FROM links l
-      WHERE l.email_id = ?
+      FROM links l WHERE l.email_id = ?
     `).all(emailId);
 
     const clicks = db.prepare(`
@@ -281,9 +249,7 @@ app.get('/api/emails/:emailId', (req, res) => {
   }
 });
 
-/**
- * Get aggregate stats for dashboard
- */
+// Get aggregate stats
 app.get('/api/stats', (req, res) => {
   const { userEmail } = req.query;
 
@@ -302,32 +268,26 @@ app.get('/api/stats', (req, res) => {
       WHERE e.user_email = ?
     `).get(userEmail, userEmail, userEmail);
 
-    // Get opens by day for the last 7 days
     const opensByDay = db.prepare(`
-      SELECT 
-        DATE(o.opened_at) as date,
-        COUNT(*) as count
+      SELECT DATE(o.opened_at) as date, COUNT(*) as count
       FROM opens o
       JOIN emails e ON o.email_id = e.id
-      WHERE e.user_email = ?
-        AND o.opened_at >= DATE('now', '-7 days')
+      WHERE e.user_email = ? AND o.opened_at >= DATE('now', '-7 days')
       GROUP BY DATE(o.opened_at)
       ORDER BY date
     `).all(userEmail);
 
-    res.json({
-      ...stats,
-      opensByDay
-    });
+    res.json({ ...stats, opensByDay });
   } catch (err) {
     console.error('Error fetching stats:', err);
     res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
 
-// Helper to get base URL
 function getBaseUrl(req) {
-  return process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+  return process.env.RENDER_EXTERNAL_URL || 
+         process.env.BASE_URL || 
+         `${req.protocol}://${req.get('host')}`;
 }
 
 // Health check
@@ -335,9 +295,28 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`📧 Email Tracking Server running on port ${PORT}`);
+// Home page
+app.get('/', (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Email Tracker</title></head>
+      <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+        <h1>📧 Email Tracker Server</h1>
+        <p style="color: green; font-size: 1.2em;">✅ Your server is running!</p>
+        <p>Now set up the Gmail add-on to start tracking emails.</p>
+        <hr>
+        <p><strong>API Endpoints:</strong></p>
+        <ul>
+          <li>POST /api/emails - Register a tracked email</li>
+          <li>POST /api/links - Register a tracked link</li>
+          <li>GET /api/emails?userEmail=you@email.com - Get your emails</li>
+          <li>GET /api/stats?userEmail=you@email.com - Get your stats</li>
+        </ul>
+      </body>
+    </html>
+  `);
 });
 
-module.exports = app;
+app.listen(PORT, () => {
+  console.log(`📧 Email Tracker running on port ${PORT}`);
+});
