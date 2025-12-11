@@ -1,55 +1,60 @@
 const express = require('express');
 const cors = require('cors');
-const Database = require('better-sqlite3');
-const path = require('path');
+const initSqlJs = require('sql.js');
 const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize SQLite database
-const db = new Database(path.join(__dirname, 'tracking.db'));
+// Database will be initialized async
+let db;
 
-// Create tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS emails (
-    id TEXT PRIMARY KEY,
-    subject TEXT,
-    recipient TEXT,
-    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    user_email TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS opens (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email_id TEXT,
-    opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    ip_address TEXT,
-    user_agent TEXT,
-    FOREIGN KEY (email_id) REFERENCES emails(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS links (
-    id TEXT PRIMARY KEY,
-    email_id TEXT,
-    original_url TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (email_id) REFERENCES emails(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS clicks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    link_id TEXT,
-    clicked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    ip_address TEXT,
-    user_agent TEXT,
-    FOREIGN KEY (link_id) REFERENCES links(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_opens_email ON opens(email_id);
-  CREATE INDEX IF NOT EXISTS idx_clicks_link ON clicks(link_id);
-  CREATE INDEX IF NOT EXISTS idx_emails_user ON emails(user_email);
-`);
+// Initialize SQL.js and create tables
+async function initDatabase() {
+  const SQL = await initSqlJs();
+  db = new SQL.Database();
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS emails (
+      id TEXT PRIMARY KEY,
+      subject TEXT,
+      recipient TEXT,
+      sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      user_email TEXT
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS opens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email_id TEXT,
+      opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      ip_address TEXT,
+      user_agent TEXT
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS links (
+      id TEXT PRIMARY KEY,
+      email_id TEXT,
+      original_url TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  db.run(`
+    CREATE TABLE IF NOT EXISTS clicks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      link_id TEXT,
+      clicked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      ip_address TEXT,
+      user_agent TEXT
+    )
+  `);
+  
+  console.log('Database initialized!');
+}
 
 // Middleware
 app.use(cors());
@@ -70,14 +75,9 @@ app.get('/t/:emailId.png', (req, res) => {
   const { emailId } = req.params;
   
   try {
-    const stmt = db.prepare(`
-      INSERT INTO opens (email_id, ip_address, user_agent)
-      VALUES (?, ?, ?)
-    `);
-    stmt.run(
-      emailId,
-      req.headers['x-forwarded-for'] || req.ip,
-      req.headers['user-agent'] || 'Unknown'
+    db.run(
+      `INSERT INTO opens (email_id, ip_address, user_agent) VALUES (?, ?, ?)`,
+      [emailId, req.headers['x-forwarded-for'] || req.ip, req.headers['user-agent'] || 'Unknown']
     );
   } catch (err) {
     console.error('Error logging open:', err);
@@ -93,28 +93,25 @@ app.get('/t/:emailId.png', (req, res) => {
   res.send(TRACKING_PIXEL);
 });
 
-// Link Click Tracking - logs clicks then redirects
+// Link Click Tracking
 app.get('/c/:linkId', (req, res) => {
   const { linkId } = req.params;
 
   try {
-    const link = db.prepare('SELECT original_url FROM links WHERE id = ?').get(linkId);
+    const result = db.exec(`SELECT original_url FROM links WHERE id = '${linkId}'`);
     
-    if (!link) {
+    if (!result.length || !result[0].values.length) {
       return res.status(404).send('Link not found');
     }
+    
+    const originalUrl = result[0].values[0][0];
 
-    const stmt = db.prepare(`
-      INSERT INTO clicks (link_id, ip_address, user_agent)
-      VALUES (?, ?, ?)
-    `);
-    stmt.run(
-      linkId,
-      req.headers['x-forwarded-for'] || req.ip,
-      req.headers['user-agent'] || 'Unknown'
+    db.run(
+      `INSERT INTO clicks (link_id, ip_address, user_agent) VALUES (?, ?, ?)`,
+      [linkId, req.headers['x-forwarded-for'] || req.ip, req.headers['user-agent'] || 'Unknown']
     );
 
-    res.redirect(302, link.original_url);
+    res.redirect(302, originalUrl);
   } catch (err) {
     console.error('Error processing click:', err);
     res.status(500).send('Error processing request');
@@ -131,11 +128,10 @@ app.post('/api/emails', (req, res) => {
   const emailId = crypto.randomBytes(8).toString('hex');
 
   try {
-    const stmt = db.prepare(`
-      INSERT INTO emails (id, subject, recipient, user_email)
-      VALUES (?, ?, ?, ?)
-    `);
-    stmt.run(emailId, subject, recipient, userEmail);
+    db.run(
+      `INSERT INTO emails (id, subject, recipient, user_email) VALUES (?, ?, ?, ?)`,
+      [emailId, subject, recipient, userEmail]
+    );
 
     res.json({
       emailId,
@@ -153,11 +149,10 @@ app.post('/api/links', (req, res) => {
   const linkId = crypto.randomBytes(6).toString('hex');
 
   try {
-    const stmt = db.prepare(`
-      INSERT INTO links (id, email_id, original_url)
-      VALUES (?, ?, ?)
-    `);
-    stmt.run(linkId, emailId, originalUrl);
+    db.run(
+      `INSERT INTO links (id, email_id, original_url) VALUES (?, ?, ?)`,
+      [linkId, emailId, originalUrl]
+    );
 
     res.json({
       linkId,
@@ -174,7 +169,7 @@ app.get('/api/emails', (req, res) => {
   const { userEmail } = req.query;
 
   try {
-    const emails = db.prepare(`
+    const result = db.exec(`
       SELECT 
         e.id,
         e.subject,
@@ -182,16 +177,23 @@ app.get('/api/emails', (req, res) => {
         e.sent_at,
         (SELECT COUNT(*) FROM opens WHERE email_id = e.id) as open_count,
         (SELECT MAX(opened_at) FROM opens WHERE email_id = e.id) as last_opened,
-        (
-          SELECT COUNT(*) FROM clicks c 
-          JOIN links l ON c.link_id = l.id 
-          WHERE l.email_id = e.id
-        ) as click_count
+        (SELECT COUNT(*) FROM clicks c JOIN links l ON c.link_id = l.id WHERE l.email_id = e.id) as click_count
       FROM emails e
-      WHERE e.user_email = ?
+      WHERE e.user_email = '${userEmail}'
       ORDER BY e.sent_at DESC
       LIMIT 100
-    `).all(userEmail);
+    `);
+
+    if (!result.length) {
+      return res.json([]);
+    }
+
+    const columns = result[0].columns;
+    const emails = result[0].values.map(row => {
+      const obj = {};
+      columns.forEach((col, i) => obj[col] = row[i]);
+      return obj;
+    });
 
     res.json(emails);
   } catch (err) {
@@ -205,31 +207,62 @@ app.get('/api/emails/:emailId', (req, res) => {
   const { emailId } = req.params;
 
   try {
-    const email = db.prepare(`SELECT * FROM emails WHERE id = ?`).get(emailId);
-
-    if (!email) {
+    // Get email
+    const emailResult = db.exec(`SELECT * FROM emails WHERE id = '${emailId}'`);
+    
+    if (!emailResult.length || !emailResult[0].values.length) {
       return res.status(404).json({ error: 'Email not found' });
     }
 
-    const opens = db.prepare(`
-      SELECT opened_at, ip_address, user_agent 
-      FROM opens WHERE email_id = ? 
-      ORDER BY opened_at DESC
-    `).all(emailId);
+    const emailColumns = emailResult[0].columns;
+    const emailRow = emailResult[0].values[0];
+    const email = {};
+    emailColumns.forEach((col, i) => email[col] = emailRow[i]);
 
-    const links = db.prepare(`
+    // Get opens
+    const opensResult = db.exec(`
+      SELECT opened_at, ip_address, user_agent 
+      FROM opens WHERE email_id = '${emailId}' 
+      ORDER BY opened_at DESC
+    `);
+    
+    const opens = opensResult.length ? opensResult[0].values.map(row => ({
+      opened_at: row[0],
+      ip_address: row[1],
+      user_agent: row[2]
+    })) : [];
+
+    // Get links
+    const linksResult = db.exec(`
       SELECT l.id, l.original_url,
         (SELECT COUNT(*) FROM clicks WHERE link_id = l.id) as click_count
-      FROM links l WHERE l.email_id = ?
-    `).all(emailId);
+      FROM links l WHERE l.email_id = '${emailId}'
+    `);
+    
+    const links = linksResult.length ? linksResult[0].values.map(row => ({
+      id: row[0],
+      original_url: row[1],
+      click_count: row[2]
+    })) : [];
 
-    const clicks = db.prepare(`
+    // Get clicks
+    const clicksResult = db.exec(`
       SELECT c.clicked_at, c.ip_address, c.user_agent, l.original_url
       FROM clicks c
       JOIN links l ON c.link_id = l.id
-      WHERE l.email_id = ?
+      WHERE l.email_id = '${emailId}'
       ORDER BY c.clicked_at DESC
-    `).all(emailId);
+    `);
+    
+    const clicks = clicksResult.length ? clicksResult[0].values.map(row => ({
+      clicked_at: row[0],
+      ip_address: row[1],
+      user_agent: row[2],
+      original_url: row[3]
+    })) : [];
+
+    const uniqueOpenIps = new Set(opens.map(o => o.ip_address));
+    const uniqueClickIps = new Set(clicks.map(c => c.ip_address));
 
     res.json({
       ...email,
@@ -238,9 +271,9 @@ app.get('/api/emails/:emailId', (req, res) => {
       clicks,
       stats: {
         totalOpens: opens.length,
-        uniqueOpens: new Set(opens.map(o => o.ip_address)).size,
+        uniqueOpens: uniqueOpenIps.size,
         totalClicks: clicks.length,
-        uniqueClicks: new Set(clicks.map(c => c.ip_address)).size
+        uniqueClicks: uniqueClickIps.size
       }
     });
   } catch (err) {
@@ -254,30 +287,29 @@ app.get('/api/stats', (req, res) => {
   const { userEmail } = req.query;
 
   try {
-    const stats = db.prepare(`
-      SELECT 
-        COUNT(DISTINCT e.id) as total_emails,
-        (SELECT COUNT(*) FROM opens o JOIN emails e2 ON o.email_id = e2.id WHERE e2.user_email = ?) as total_opens,
-        (
-          SELECT COUNT(*) FROM clicks c 
-          JOIN links l ON c.link_id = l.id 
-          JOIN emails e3 ON l.email_id = e3.id 
-          WHERE e3.user_email = ?
-        ) as total_clicks
-      FROM emails e
-      WHERE e.user_email = ?
-    `).get(userEmail, userEmail, userEmail);
+    const emailsResult = db.exec(`SELECT COUNT(*) FROM emails WHERE user_email = '${userEmail}'`);
+    const totalEmails = emailsResult.length ? emailsResult[0].values[0][0] : 0;
 
-    const opensByDay = db.prepare(`
-      SELECT DATE(o.opened_at) as date, COUNT(*) as count
-      FROM opens o
-      JOIN emails e ON o.email_id = e.id
-      WHERE e.user_email = ? AND o.opened_at >= DATE('now', '-7 days')
-      GROUP BY DATE(o.opened_at)
-      ORDER BY date
-    `).all(userEmail);
+    const opensResult = db.exec(`
+      SELECT COUNT(*) FROM opens o 
+      JOIN emails e ON o.email_id = e.id 
+      WHERE e.user_email = '${userEmail}'
+    `);
+    const totalOpens = opensResult.length ? opensResult[0].values[0][0] : 0;
 
-    res.json({ ...stats, opensByDay });
+    const clicksResult = db.exec(`
+      SELECT COUNT(*) FROM clicks c 
+      JOIN links l ON c.link_id = l.id 
+      JOIN emails e ON l.email_id = e.id 
+      WHERE e.user_email = '${userEmail}'
+    `);
+    const totalClicks = clicksResult.length ? clicksResult[0].values[0][0] : 0;
+
+    res.json({
+      total_emails: totalEmails,
+      total_opens: totalOpens,
+      total_clicks: totalClicks
+    });
   } catch (err) {
     console.error('Error fetching stats:', err);
     res.status(500).json({ error: 'Failed to fetch stats' });
@@ -305,18 +337,18 @@ app.get('/', (req, res) => {
         <p style="color: green; font-size: 1.2em;">✅ Your server is running!</p>
         <p>Now set up the Gmail add-on to start tracking emails.</p>
         <hr>
-        <p><strong>API Endpoints:</strong></p>
-        <ul>
-          <li>POST /api/emails - Register a tracked email</li>
-          <li>POST /api/links - Register a tracked link</li>
-          <li>GET /api/emails?userEmail=you@email.com - Get your emails</li>
-          <li>GET /api/stats?userEmail=you@email.com - Get your stats</li>
-        </ul>
+        <p><strong>Note:</strong> Data is stored in memory and will reset when the server restarts. This is normal for the free tier!</p>
       </body>
     </html>
   `);
 });
 
-app.listen(PORT, () => {
-  console.log(`📧 Email Tracker running on port ${PORT}`);
+// Start server after database is ready
+initDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`📧 Email Tracker running on port ${PORT}`);
+  });
+}).catch(err => {
+  console.error('Failed to initialize database:', err);
+  process.exit(1);
 });
